@@ -15,6 +15,7 @@ import org.apache.http.auth.UsernamePasswordCredentials;
 import org.apache.http.client.CredentialsProvider;
 import org.apache.http.client.config.AuthSchemes;
 import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.protocol.HttpClientContext;
 import org.apache.http.config.Registry;
 import org.apache.http.config.RegistryBuilder;
 import org.apache.http.impl.auth.DigestSchemeFactory;
@@ -23,8 +24,10 @@ import org.apache.http.impl.auth.SPNegoSchemeFactory;
 import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.apache.http.impl.client.HttpClients;
 import org.apache.http.impl.conn.SystemDefaultRoutePlanner;
+import org.apache.http.protocol.HttpContext;
 import org.jboss.logging.Logger;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.net.ProxySelector;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -44,7 +47,6 @@ public class GreetingMain implements QuarkusApplication {
 
     @Override
     public int run(String... args) throws URISyntaxException {
-        logger.info("Version 3");
 
         String useSubjectCredsOnlyPropKey = "javax.security.auth.useSubjectCredsOnly";
         String loginConfigPropKey = "java.security.auth.login.config";
@@ -103,28 +105,32 @@ public class GreetingMain implements QuarkusApplication {
             url = args[0];
         }
 
+        //
+        // Configure proxy authentication
+        //
+        CredentialsProvider credsProvider = new BasicCredentialsProvider();
         try {
             logger.info("Inspect output of proxy selector");
-            proxySelector.select(new URI(url)).iterator().forEachRemaining(p -> {
-                logger.info("Resolved proxy address: %s%n".formatted(p.address()));
+            proxySelector.select(new URI(url)).forEach(p -> {
+                if (Objects.nonNull(p) && Objects.nonNull(p.address())) {
+                    logger.info("Resolved proxy address: %s %s".formatted(p.address(), p.address().getClass().getName()));
+                }
+            });
+            proxySelector.select(new URI(url)).stream().forEach(p -> {
+                if (Objects.nonNull(p) && Objects.nonNull(p.address())) {
+                    InetSocketAddress address = (InetSocketAddress) p.address();
+                    // For Kerberos/Negotiate (SPNEGO), typically no username/password is used
+                    // because the credentials come from the ticket cache or keytab.
+                    credsProvider.setCredentials(new AuthScope(new HttpHost(address.getHostName(), address.getPort())), new KerberosCredentials(null));
+                }
             });
         } catch (URISyntaxException e) {
             logger.error("failed to get proxy setting", e);
         }
 
-        builder.setRoutePlanner(new SystemDefaultRoutePlanner(proxySelector));
-        //builder.setProxy(new HttpHost("proxyserver", 3128));
+        //builder.setRoutePlanner(new SystemDefaultRoutePlanner(proxySelector));
+        builder.setProxy(new HttpHost("proxyserver", 3128));
 
-        //
-        // Configure proxy authentication
-        //
-        CredentialsProvider credsProvider = new BasicCredentialsProvider();
-        credsProvider.setCredentials(
-                AuthScope.ANY,
-                // For Kerberos/Negotiate (SPNEGO), typically no username/password is used
-                // because the credentials come from the ticket cache or keytab.
-                new KerberosCredentials(null)
-        );
 //        credsProvider.setCredentials(
 //                AuthScope.ANY,
                     // For Basic/Digest authentication, use username/password
@@ -136,17 +142,22 @@ public class GreetingMain implements QuarkusApplication {
                 .register(AuthSchemes.DIGEST, new DigestSchemeFactory())
                 .register(AuthSchemes.BASIC, new BasicSchemeFactory())
                 .build();
-        builder.setDefaultCredentialsProvider(credsProvider).setDefaultAuthSchemeRegistry(authSchemeRegistry);
+
+        HttpClientContext context = HttpClientContext.create();
+        context.setCredentialsProvider(credsProvider);
+        context.setAuthSchemeRegistry(authSchemeRegistry);
 
         //
         // Send HTTP request
         //
         try {
-            var response = builder.build().execute(new HttpGet(url));
+            var response = builder.build().execute(new HttpGet(url), context);
             //logger.info("Response body: " + new String(response.getEntity().getContent().readAllBytes()));
         } catch (IOException e) {
             logger.error("Sending HTTP fails", e);
         }
+
+        logger.info("Version 6");
 
         return 0;
     }
